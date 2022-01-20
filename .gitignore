@@ -36,3 +36,9 @@ lerna-debug.log*
 
 # Package manager
 yarn.lock
+
+# Dotenv
+.env
+
+# Graphql
+src/schema.gql
