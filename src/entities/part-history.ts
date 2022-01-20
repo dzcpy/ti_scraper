@@ -12,6 +12,7 @@ export class PartHistory {
     onDelete: 'CASCADE',
     onUpdateIntegrity: 'CASCADE',
     primary: true,
+    wrappedReference: true,
   })
   part: IdentifiedReference<Part>;
 

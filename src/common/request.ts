@@ -1,9 +1,13 @@
 import { curly, HeaderInfo } from 'node-libcurl';
+import { stringify } from 'node:querystring';
+import { createBrotliDecompress, createUnzip } from 'node:zlib';
+import streamToPromise from 'stream-to-promise';
 import { ProxyAgent, request as undici } from 'undici';
 
 import type { IncomingHttpHeaders } from 'node:http';
 import type { JsonValue } from 'type-fest';
 import type { Dispatcher } from 'undici';
+
 const convertReqHeaders = (headers: Record<string, string>) => Object.entries(headers).map(([key, value]) => key + ': ' + value);
 const convertResHeaders = (headers: HeaderInfo) => {
   const resHeaders: IncomingHttpHeaders = {};
@@ -36,11 +40,17 @@ export type RequestReturnType = {
 
 export const request = async (
   url: string,
-  { method = 'GET', body, query, proxy, cookies, headers: reqHeaders = {}, maxRedirects = 3, timeout, driver = 'curly' }: RequestOptionsType = {},
+  { method = 'GET', body, query = {}, proxy, cookies, headers: reqHeaders = {}, maxRedirects = 3, timeout, driver = 'curly' }: RequestOptionsType = {},
 ): Promise<RequestReturnType> => {
   const urlObj = new URL(url);
   if (typeof query === 'object') {
-    Object.assign(urlObj.searchParams, query);
+    urlObj.search = `?${stringify(
+      Object.assign(
+        {},
+        Array.from(urlObj.searchParams.entries()).reduce((prev, [key, value]) => Object.assign(prev, { [key]: value }), {}),
+        query,
+      ),
+    )}`;
   }
   const cookieString = cookies
     ? typeof cookies === 'string'
@@ -59,7 +69,7 @@ export const request = async (
         }
       }
       const options: { dispatcher?: Dispatcher } & Omit<Dispatcher.RequestOptions, 'origin' | 'path'> = {
-        dispatcher: proxy ? new ProxyAgent(proxy) : undefined,
+        ...(proxy ? { dispatcher: new ProxyAgent(proxy) } : {}),
         method,
         headers: reqHeaders,
         maxRedirections: maxRedirects,
@@ -68,7 +78,20 @@ export const request = async (
         options.headersTimeout = timeout;
       }
       const { statusCode, body, headers } = await undici(urlObj, options);
-      const data = /application\/json/.test(headers?.['content-type']) ? await body.json() : await body.text();
+      let data: any;
+      switch (headers['content-encoding']) {
+        case 'br':
+          data = await streamToPromise(body.pipe(createBrotliDecompress()));
+          break;
+        case 'gzip':
+        case 'deflate':
+          data = await streamToPromise(body.pipe(createUnzip()));
+          break;
+        default:
+          data = await streamToPromise(body);
+          break;
+      }
+      data = /application\/json/.test(headers?.['content-type']) ? JSON.parse(data) : data.toString('utf-8');
       return {
         data,
         headers,
@@ -80,7 +103,7 @@ export const request = async (
       if (!client) {
         return;
       }
-      let postFields: string;
+      let postFields: string | undefined;
       if (body) {
         if (typeof body === 'string') {
           postFields = body;
@@ -95,13 +118,14 @@ export const request = async (
           postFields = JSON.stringify(body);
         }
       }
-      const { statusCode, data, headers } = await client(url, {
-        proxy: proxy ? proxy : undefined,
-        postFields,
+      const { statusCode, data, headers } = await client(urlObj.href, {
+        ...(proxy ? { proxy } : {}),
+        ...(postFields ? { postFields } : {}),
         httpHeader: [...convertReqHeaders(reqHeaders), cookieString ? `Cookie: ${cookieString}` : undefined],
         sslVerifyHost: false,
         sslVerifyPeer: false,
         followLocation: true,
+        acceptEncoding: 'br, gzip, deflate',
         maxRedirs: maxRedirects,
       });
       return {

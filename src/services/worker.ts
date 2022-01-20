@@ -100,11 +100,12 @@ export class WorkerService implements OnModuleInit {
   }
 
   async updateProducts(lang = 'cn') {
-    const categories = JSON.parse(await this.redis.get(CATEGORIES_REDIS_KEY));
+    // const categories = JSON.parse(await this.redis.get(CATEGORIES_REDIS_KEY));
+    const categories = await this.categoryService.find({}, { fields: [] });
     await pMap(
       categories,
       async ({ id: categoryId }) => {
-        const { data } = await request(TI_CATALOG_URL_PREFIX + categoryId + TI_CATALOG_URL_SUFFIX, {
+        const { data: { ParametricResults } = {} } = await request(TI_CATALOG_URL_PREFIX + categoryId + TI_CATALOG_URL_SUFFIX, {
           query: { lang, output: 'json' },
           headers: {
             ...defaultRequestHeaders,
@@ -115,12 +116,12 @@ export class WorkerService implements OnModuleInit {
           driver: 'undici',
         });
         await pMap(
-          data?.ParametricResults || [],
+          ParametricResults || [],
           async ({ o1: id, o3: name, p3318: stock }) => {
             stock = Number(stock);
             const category = await this.categoryService.getReference(categoryId);
             const product = await this.productService.upsert({ id, name, stock, category });
-            const { data } = await request(TI_PARTS_URL_PREFIX + id + TI_PARTS_URL_SUFFIX, {
+            const { data: parts } = await request(TI_PARTS_URL_PREFIX + id + TI_PARTS_URL_SUFFIX, {
               query: { lang, output: 'json' },
               headers: {
                 ...defaultRequestHeaders,
@@ -131,14 +132,35 @@ export class WorkerService implements OnModuleInit {
               proxy,
               driver: 'undici',
             });
-            for (const { orderablePartNumber: id, inventory: stock } of data) {
-              if (stock === undefined) {
-                await this.partService.upsert({ id, stock: 0, product, active: false });
-              } else {
-                await this.partService.upsert({ id, stock: Number(stock), product });
+            for (const { orderablePartNumber: id, inventory: stock } of parts) {
+              const active = stock !== undefined;
+              let price1: number = null;
+              let price100: number = null;
+              let price250: number = null;
+              let price1000: number = null;
+              if (active) {
+                try {
+                  const { data: { tiered_price_list: priceList } = { tiered_price_list: [] } } = await request(TI_PRICE_URL, {
+                    query: { opn: id },
+                    headers: {
+                      ...defaultRequestHeaders,
+                      'Content-Type': 'application/json',
+                      Accept: '*/*',
+                    },
+                    proxy,
+                    driver: 'undici',
+                  });
+                  price1 = Number(find(find(priceList, { range_from: '1' })?.price_list ?? [], { currency: 'USD' })?.currency_price) || null;
+                  price100 = Number(find(find(priceList, { range_from: '100' })?.price_list ?? [], { currency: 'USD' })?.currency_price) || null;
+                  price250 = Number(find(find(priceList, { range_from: '250' })?.price_list ?? [], { currency: 'USD' })?.currency_price) || null;
+                  price1000 = Number(find(find(priceList, { range_from: '1000' })?.price_list ?? [], { currency: 'USD' })?.currency_price) || null;
+                } catch (error) {
+                  console.log(error);
+                }
               }
+              await this.partService.upsert({ id, stock: Number(stock) || 0, product, price1, price100, price250, price1000, active });
             }
-            await setTimeout(400);
+            await setTimeout(250);
           },
           { concurrency: 1 },
         );
@@ -150,11 +172,10 @@ export class WorkerService implements OnModuleInit {
 
   async updatePrice(init = false) {
     const parts = await this.partService.find(init ? { price1: null } : {});
-    console.log(parts.length);
     await pMap(
       parts,
       async (part) => {
-        const { data } = await request(TI_PRICE_URL, {
+        const { data: { tiered_price_list: priceList } = { tiered_price_list: [] } } = await request(TI_PRICE_URL, {
           query: { opn: part.id },
           headers: {
             ...defaultRequestHeaders,
@@ -164,7 +185,6 @@ export class WorkerService implements OnModuleInit {
           proxy,
           driver: 'undici',
         });
-        const priceList = data.tiered_price_list;
         const price1 = Number(find(find(priceList, { range_from: '1' })?.price_list ?? [], { currency: 'USD' })?.currency_price) || null;
         const price100 = Number(find(find(priceList, { range_from: '100' })?.price_list ?? [], { currency: 'USD' })?.currency_price) || null;
         const price250 = Number(find(find(priceList, { range_from: '250' })?.price_list ?? [], { currency: 'USD' })?.currency_price) || null;
@@ -198,8 +218,8 @@ export class WorkerService implements OnModuleInit {
   }
 
   async onModuleInit() {
-    await this.updateCategories();
-    // await this.updateProducts();
+    // await this.updateCategories();
+    await this.updateProducts();
     // await this.updatePrice(true);
   }
 }

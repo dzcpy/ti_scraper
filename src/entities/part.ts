@@ -44,6 +44,7 @@ export class Part {
     entity: () => Product,
     onDelete: 'CASCADE',
     onUpdateIntegrity: 'CASCADE',
+    wrappedReference: true,
   })
   product: IdentifiedReference<Product>;
 

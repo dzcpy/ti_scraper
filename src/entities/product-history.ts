@@ -12,6 +12,7 @@ export class ProductHistory {
     onDelete: 'CASCADE',
     onUpdateIntegrity: 'CASCADE',
     primary: true,
+    wrappedReference: true,
   })
   product: IdentifiedReference<Product>;
 

@@ -20,6 +20,7 @@ export class Product {
     entity: () => Category,
     onDelete: 'CASCADE',
     onUpdateIntegrity: 'CASCADE',
+    wrappedReference: true,
   })
   category: IdentifiedReference<Category>;
 
