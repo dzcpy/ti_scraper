@@ -1,5 +1,5 @@
 import { Product } from '~/entities';
-import { PaginatedInput, PaginatedOutput } from '~/utils';
+import { PaginatedInput, PaginatedOutput } from '~/common';
 
 import { InputType, ObjectType } from '@nestjs/graphql';
 

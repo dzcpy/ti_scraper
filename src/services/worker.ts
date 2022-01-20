@@ -1,4 +1,3 @@
-import axios, { AxiosProxyConfig } from 'axios';
 import { load } from 'cheerio';
 import { convert } from 'html-to-text';
 import { find } from 'lodash';
@@ -10,7 +9,7 @@ import XRegExp from 'xregexp';
 import { CATEGORIES_REDIS_KEY, Part } from '~/entities';
 import { CategoryService, PartService, ProductService } from '~/services';
 import { EnvSettings } from '~/settings';
-import { validateStatus } from '~/utils';
+import { request } from '~/common';
 
 import { FilterQuery, wrap } from '@mikro-orm/core';
 import { InjectRedis, Redis } from '@nestjs-modules/ioredis';
@@ -19,16 +18,16 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 
 const { TI_HOMEPAGE_URL, PROXY_ENABLED, PROXY_HOST, PROXY_PORT, PROXY_USERNAME, PROXY_PASSWORD } = EnvSettings;
 
-const PROXY_AXIOS: AxiosProxyConfig = {
-  host: PROXY_HOST,
-  port: Number(PROXY_PORT),
-  auth: PROXY_USERNAME && PROXY_PASSWORD ? { username: PROXY_USERNAME, password: PROXY_PASSWORD } : undefined,
-};
+const proxy = PROXY_ENABLED
+  ? PROXY_USERNAME && PROXY_PASSWORD
+    ? `http://${PROXY_USERNAME}:${PROXY_PASSWORD}@${PROXY_HOST}:${PROXY_PORT}`
+    : `http://${PROXY_HOST}:${PROXY_PORT}`
+  : undefined;
 
 const TI_CATALOG_URL_PREFIX = TI_HOMEPAGE_URL + '/selectiontool/paramdata/family/';
 const TI_CATALOG_URL_SUFFIX = '/results';
 
-const TI_PRODUCTS_URL_PREFIX = TI_HOMEPAGE_URL + '/';
+const TI_PRODUCTS_URL_PREFIX = TI_HOMEPAGE_URL + '/zh-cn/';
 const TI_PRODUCTS_URL_SUFFIX = '/products.html';
 
 const TI_PARTS_URL_PREFIX = TI_HOMEPAGE_URL + '/productmodel/';
@@ -38,7 +37,7 @@ const TI_PRICE_URL = TI_HOMEPAGE_URL + `/popularorderables/addtocart/${/ti\.com\
 
 const defaultRequestHeaders = {
   'User-Agent': new UserAgent({ deviceCategory: 'desktop' }).toString(),
-  Connection: 'keep-alive',
+  // Connection: 'keep-alive',
   'Accept-Encoding': 'gzip, deflate, br',
   'Accept-Language': 'en-US,en;q=0.9',
   'Sec-Fetch-Dest': 'empty',
@@ -60,14 +59,13 @@ export class WorkerService implements OnModuleInit {
 
   @Cron(CronExpression.EVERY_WEEK)
   async updateCategories() {
-    const { data } = await axios.get(TI_HOMEPAGE_URL, {
-      proxy: PROXY_ENABLED ? PROXY_AXIOS : false,
-      headers: {
-        Cookie: 'pf-accept-language=zh-CN',
-      },
+    const { data } = await request(TI_HOMEPAGE_URL, {
+      proxy,
+      cookies: { 'pf-accept-language': 'zh-CN' },
+      driver: 'undici',
     });
 
-    const $ = load(data);
+    const $ = load(data as string);
 
     const categories = await pMap(
       $('li a.js-megaMenu-level-1:not([href*=/applications/])')
@@ -75,20 +73,13 @@ export class WorkerService implements OnModuleInit {
         .map((dom) => ({ key: XRegExp.match($(dom).attr('href'), /(?<=\/)[a-z-_]*?(?=\/overview.html)/) as string, name: convert($(dom).html()) }))
         .filter((obj) => obj.key),
       async ({ name, key }) => {
-        let result = await axios.get(TI_PRODUCTS_URL_PREFIX + key + TI_PRODUCTS_URL_SUFFIX, {
+        const { data } = await request(TI_PRODUCTS_URL_PREFIX + key + TI_PRODUCTS_URL_SUFFIX, {
           headers: { ...defaultRequestHeaders },
-          proxy: PROXY_ENABLED ? PROXY_AXIOS : false,
-          validateStatus,
-          maxRedirects: 0,
+          proxy,
+          driver: 'undici',
         });
-        if (result.status > 300 && result.headers.location) {
-          result = await axios.get(result.headers.location, {
-            headers: { ...defaultRequestHeaders },
-            proxy: PROXY_ENABLED ? PROXY_AXIOS : false,
-          });
-        }
 
-        const $ = load(result.data);
+        const $ = load(data);
         const id = runInContext($('script:contains("tiProductPathID")').html(), createContext())?.replace(/[^\d]/g, '');
 
         if (!id) {
@@ -103,6 +94,7 @@ export class WorkerService implements OnModuleInit {
     if (!categories.length) {
       throw new Error('Fetching categories failed');
     }
+
     // this.redis.set(CATEGORIES_REDIS_KEY, JSON.stringify(categories));
     return categories;
   }
@@ -112,14 +104,15 @@ export class WorkerService implements OnModuleInit {
     await pMap(
       categories,
       async ({ id: categoryId }) => {
-        const { data } = await axios.get(TI_CATALOG_URL_PREFIX + categoryId + TI_CATALOG_URL_SUFFIX, {
-          params: { lang, output: 'json' },
+        const { data } = await request(TI_CATALOG_URL_PREFIX + categoryId + TI_CATALOG_URL_SUFFIX, {
+          query: { lang, output: 'json' },
           headers: {
             ...defaultRequestHeaders,
             'Content-Type': 'application/json',
             Accept: '*/*',
           },
-          proxy: PROXY_ENABLED ? PROXY_AXIOS : undefined,
+          proxy,
+          driver: 'undici',
         });
         await pMap(
           data?.ParametricResults || [],
@@ -127,15 +120,16 @@ export class WorkerService implements OnModuleInit {
             stock = Number(stock);
             const category = await this.categoryService.getReference(categoryId);
             const product = await this.productService.upsert({ id, name, stock, category });
-            const { data } = await axios.get(TI_PARTS_URL_PREFIX + id + TI_PARTS_URL_SUFFIX, {
-              params: { lang, output: 'json' },
+            const { data } = await request(TI_PARTS_URL_PREFIX + id + TI_PARTS_URL_SUFFIX, {
+              query: { lang, output: 'json' },
               headers: {
                 ...defaultRequestHeaders,
                 'Content-Type': 'application/json',
                 Referer: TI_HOMEPAGE_URL + '/product/' + id,
                 Accept: '*/*',
               },
-              proxy: PROXY_ENABLED ? PROXY_AXIOS : undefined,
+              proxy,
+              driver: 'undici',
             });
             for (const { orderablePartNumber: id, inventory: stock } of data) {
               if (stock === undefined) {
@@ -160,14 +154,15 @@ export class WorkerService implements OnModuleInit {
     await pMap(
       parts,
       async (part) => {
-        const { data } = await axios.get(TI_PRICE_URL, {
-          params: { opn: part.id },
+        const { data } = await request(TI_PRICE_URL, {
+          query: { opn: part.id },
           headers: {
             ...defaultRequestHeaders,
             'Content-Type': 'application/json',
             Accept: '*/*',
           },
-          proxy: PROXY_ENABLED ? PROXY_AXIOS : undefined,
+          proxy,
+          driver: 'undici',
         });
         const priceList = data.tiered_price_list;
         const price1 = Number(find(find(priceList, { range_from: '1' })?.price_list ?? [], { currency: 'USD' })?.currency_price) || null;
@@ -203,7 +198,7 @@ export class WorkerService implements OnModuleInit {
   }
 
   async onModuleInit() {
-    // await this.updateCategories();
+    await this.updateCategories();
     // await this.updateProducts();
     // await this.updatePrice(true);
   }

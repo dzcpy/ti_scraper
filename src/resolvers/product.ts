@@ -3,7 +3,7 @@ import { ProductService } from '~/services';
 
 import { Args, Query, Resolver } from '@nestjs/graphql';
 import { ProductsInput, ProductsOutput } from '~/dtos';
-import { formatPaginatedOutput } from '~/utils';
+import { formatPaginatedOutput } from '~/common';
 
 @Resolver(() => Product)
 export class ProductResolver {

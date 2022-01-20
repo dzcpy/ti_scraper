@@ -1,2 +1,2 @@
-export * from './axios';
 export * from './paginated';
+export * from './request';
