@@ -1,6 +1,6 @@
 import { resolve } from 'path';
 import { EnvSettings, MikroOrmConfig } from '~/settings';
-
+import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
 // import {} from '~/resolvers';
 // import {} from '~/services';
 import { MikroOrmModule } from '@mikro-orm/nestjs';
@@ -22,7 +22,8 @@ const redisOptions = {
 
 @Module({
   imports: [
-    GraphQLModule.forRoot({
+    GraphQLModule.forRoot<ApolloDriverConfig>({
+      driver: ApolloDriver,
       debug,
       playground: debug,
       introspection: debug,
